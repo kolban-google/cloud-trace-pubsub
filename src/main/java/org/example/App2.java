@@ -10,6 +10,7 @@ import io.opentelemetry.api.trace.SpanContext;
 import io.opentelemetry.api.trace.TraceFlags;
 import io.opentelemetry.api.trace.TraceState;
 import io.opentelemetry.context.Context;
+import io.opentelemetry.context.Scope;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
@@ -45,59 +46,79 @@ public class App2 {
       .buildAndRegisterGlobal();
   } // setupTraceExporter
 
+  /**
+   * The message receiver is instantiated when a new message is available for our PubSub subscription.
+   * We start a new Cloud Trace span and perform some work on the message.
+   */
   private class MyMessageReceiver implements MessageReceiver {
-
+    /**
+     * Handle the message.
+     *
+     * @param pubsubMessage    The PubSub message received for the subscription.
+     * @param ackReplyConsumer The message ACK processor.
+     */
     @Override
     public void receiveMessage(PubsubMessage pubsubMessage, AckReplyConsumer ackReplyConsumer) {
-      System.out.println("App2: Received a message");
-      System.out.println("App2: Message content: " + pubsubMessage);
-      ackReplyConsumer.ack();
       try {
+        // Get the traceId and spanId from the attributes of the message.
         String traceId = pubsubMessage.getAttributesOrThrow("XXX_traceid");
         String spanId = pubsubMessage.getAttributesOrThrow("XXX_spanid");
+
+        // Create a new trace span using the traceId/spanId as received as the parent for the new span.
         SpanContext spanContext = SpanContext.createFromRemoteParent(
           traceId,
           spanId, TraceFlags.getSampled(), TraceState.getDefault());
         Context context = Context.root().with(Span.wrap(spanContext));
-        // Process the message
         Span span =
           openTelemetrySdk.getTracer(App2.class.getName())
-            .spanBuilder("App2: Description")
+            .spanBuilder("App2: The subscriber")
             .setParent(context)
             .setAttribute("service.name", "App2")
+            .setAttribute("messaging.message.id", pubsubMessage.getMessageId())
             .startSpan();
-        span.makeCurrent();
+        try (Scope scope = span.makeCurrent()) {
 
+          System.out.println("App2: Received a message");
+          System.out.println("App2: Message content: " + pubsubMessage);
+          ackReplyConsumer.ack();
 
-        //System.out.println("App2: Message attributes: " + pubsubMessage.getAttributesMap());
-        // Sleep for 1/2 second
-        Thread.sleep(500);
-        System.out.println("App2: Processed the message");
-        span.end();
-        //openTelemetrySdk.getSdkTracerProvider().forceFlush();
+          // Sleep for 1/2 second; this represents us doing some useful work.
+          Thread.sleep(500);
+
+          System.out.println("App2: Processed the message");
+        } finally {
+          span.end();
+        }
       } catch (Exception e) {
         e.printStackTrace();
       }
-    }
+    } // receiveMessage
   } // MyMessageReceiver
 
+  /**
+   * Run the logic of our application.
+   */
   public void run() {
     try {
-      Subscriber subscriber;
       openTelemetrySdk = setupTraceExporter();
+
       System.out.println("App2: Starting");
-      subscriber = Subscriber.newBuilder(subscriptionName, new MyMessageReceiver()).build();
+      Subscriber subscriber = Subscriber.newBuilder(subscriptionName, new MyMessageReceiver()).build();
       subscriber.startAsync().awaitRunning();
-      System.out.println("App2: Subscriber listening");
+      System.out.println("App2: Subscriber running");
       subscriber.awaitTerminated();
       System.out.println("App2: Subscriber terminated");
-    } catch(Exception e) {
+    } catch (Exception e) {
       e.printStackTrace();
     }
   } // run
 
+  /**
+   * Entry point into our application.
+   *
+   * @param args Arguments passed into our application.
+   */
   public static void main(String[] args) {
-    App2 app2 = new App2();
-    app2.run();
+    new App2().run();
   } // main
 } // App2
